@@ -4523,6 +4523,11 @@ fn paint_laid_dom_scrolled(
     let mut normal: Vec<obscura_dom::tree::NodeId> = Vec::new();
     let mut consumed: std::collections::HashSet<obscura_dom::tree::NodeId> =
         std::collections::HashSet::new();
+    // Positioned boxes with `z-index: auto` paint in the positioned band but
+    // are not stacking contexts. They still need the recursive unit path so
+    // their subtree paints with them instead of being dropped.
+    let mut positioned_units: std::collections::HashSet<obscura_dom::tree::NodeId> =
+        std::collections::HashSet::new();
     let mut paint_nodes = paint_root.into_iter().collect::<Vec<_>>();
     paint_nodes.extend(crate::dom::rendered_descendants(
         tree,
@@ -4569,6 +4574,28 @@ fn paint_laid_dom_scrolled(
             } else {
                 pos_layers.push((z, vec![nid]));
             }
+        } else if suppress_stacking_for != Some(nid)
+            && laid.styles.get(&nid).is_some_and(|style| {
+                matches!(
+                    style.position,
+                    Some(taffy::Position::Relative) | Some(taffy::Position::Absolute)
+                )
+            })
+        {
+            // A positioned box with `z-index: auto` does not create a stacking
+            // context, but CSS still paints it in the positioned band (step 8),
+            // above in-flow block backgrounds. Without this a later in-flow
+            // sibling's background covered absolutely positioned content
+            // entirely (a dashboard body painted under the footer/next block).
+            // Descendants move with the unit; nested positioned boxes inside
+            // are resolved while painting the isolated unit.
+            let mut sub = vec![nid];
+            sub.extend(crate::dom::rendered_descendants(tree, nid));
+            for &member in &sub {
+                consumed.insert(member);
+            }
+            positioned_units.insert(nid);
+            pos_layers.push((0, vec![nid]));
         } else if is_float_root {
             consumed.insert(nid);
             consumed.extend(crate::dom::rendered_descendants(tree, nid));
@@ -4645,7 +4672,9 @@ fn paint_laid_dom_scrolled(
         if svg_subtree_skip.contains(&nid) {
             continue;
         }
-        if suppress_stacking_for != Some(nid) && stacking_z_index(tree, laid, nid).is_some() {
+        if suppress_stacking_for != Some(nid)
+            && (stacking_z_index(tree, laid, nid).is_some() || positioned_units.contains(&nid))
+        {
             opacity_subtree_skip.insert(nid);
             opacity_subtree_skip.extend(crate::dom::rendered_descendants(tree, nid));
             // A stacking context is one structural paint item in its parent.
@@ -20007,6 +20036,24 @@ mod tests {
         let expected =
             image::imageops::resize(&source, 60, 60, image::imageops::FilterType::Lanczos3);
         assert_eq!(two_x.data(), expected.as_raw());
+    }
+
+    #[test]
+    fn positioned_auto_box_paints_above_a_later_in_flow_block() {
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0">
+                <div style="position:relative;height:50px;width:100px;background:#ddd">
+                    <div style="position:absolute;top:20px;left:0;width:100px;height:80px;background:#f00"></div>
+                </div>
+                <div style="height:100px;width:100px;background:#00f"></div>
+            </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (100.0, 120.0), None).expect("pixmap");
+        let pixel = pixmap.pixel(50, 60).expect("sample pixel");
+        assert!(
+            pixel.red() > 200 && pixel.blue() < 60,
+            "z-index:auto positioned box must paint above the later in-flow block: {pixel:?}"
+        );
     }
 
     #[test]

@@ -17446,6 +17446,29 @@ mod tests {
     }
 
     #[test]
+    fn percentage_calc_width_resolves_through_auto_width_ancestors() {
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                .wrap{position:relative;height:120px}
+                .panel{position:absolute;top:20px;width:600px}
+                .row{display:flex;flex-wrap:wrap}
+                .cell{width:calc(50% - 10px);height:20px}
+            </style>
+            <div class="wrap"><div class="panel"><div class="row">
+                <div id="c1" class="cell"></div>
+                <div id="c2" class="cell"></div>
+            </div></div></div>"#,
+        );
+        let laid = layout_dom(&tree, (800.0, 600.0));
+        let cell = laid.rects[&tree.get_element_by_id("c1").unwrap()];
+        assert!(
+            (cell.width - 290.0).abs() < 0.5,
+            "calc(50% - 10px) inside a 600px panel should be 290px, got {cell:?}"
+        );
+    }
+
+    #[test]
     fn root_and_body_inline_outer_geometry_matches_blockification_rules() {
         for display in ["inline-block", "inline-flex", "inline-grid"] {
             let tree = parse_html(&format!(
