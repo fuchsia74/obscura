@@ -5028,6 +5028,7 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
             retained,
             animation_sample,
             animation_timeline,
+            None,
         );
     let style_only = sheet.has_style_container_queries() && !sheet.has_geometry_container_queries();
     if !sheet.has_container_queries() || style_only {
@@ -5049,6 +5050,17 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
                 retained_fallback
             );
         }
+        laid = refine_percentage_widths(
+            laid,
+            tree,
+            viewport,
+            intrinsic,
+            fonts,
+            &sheet,
+            &shadow_sheets,
+            animation_sample,
+            animation_timeline,
+        );
         return (
             laid,
             ContainerLayoutTelemetry {
@@ -5100,6 +5112,17 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
                 retained_fallback
             );
         }
+        laid = refine_percentage_widths(
+            laid,
+            tree,
+            viewport,
+            intrinsic,
+            fonts,
+            &sheet,
+            &shadow_sheets,
+            animation_sample,
+            animation_timeline,
+        );
         return (
             laid,
             ContainerLayoutTelemetry {
@@ -5158,6 +5181,7 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
                 None,
                 animation_sample,
                 animation_timeline,
+                None,
             );
         passes = pass;
         query.evaluations += pass_query.evaluations;
@@ -5232,6 +5256,7 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
                 None,
                 animation_sample,
                 animation_timeline,
+                None,
             );
         laid = fallback;
         passes += 1;
@@ -5264,6 +5289,17 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
             retained_fallback
         );
     }
+    laid = refine_percentage_widths(
+        laid,
+        tree,
+        viewport,
+        intrinsic,
+        fonts,
+        &sheet,
+        &shadow_sheets,
+        animation_sample,
+        animation_timeline,
+    );
     (
         laid,
         ContainerLayoutTelemetry {
@@ -5277,6 +5313,104 @@ fn layout_dom_with_web_fonts_pass_limit_and_query_seed(
     )
 }
 
+/// Parent content widths for elements whose width/min/max uses a percentage
+/// calc(). Those declarations are resolved to pixels during the layout walk,
+/// where an auto-width ancestor still reports an indefinite containing block
+/// (0), so `calc(50% - 10px)` collapses to 0 and the element disappears.
+/// A first pass produces real geometry; this collects the parent content
+/// width that the second pass should have used.
+fn percentage_width_overrides(laid: &DomLayout, tree: &DomTree) -> HashMap<NodeId, f32> {
+    let mut overrides = HashMap::new();
+    for (id, _) in &laid.rects {
+        let Some(style) = laid.styles.get(id) else {
+            continue;
+        };
+        if matches!(style.position, Some(taffy::Position::Absolute)) {
+            continue;
+        }
+        let uses_percentage_calc = [0usize, 2, 4].iter().any(|index| {
+            style.size_expressions[*index]
+                .as_deref()
+                .is_some_and(|expression| expression.contains('%'))
+        });
+        if !uses_percentage_calc {
+            continue;
+        }
+        let Some(parent) = rendered_parent(tree, *id) else {
+            continue;
+        };
+        let (Some(parent_rect), Some(parent_style)) =
+            (laid.rects.get(&parent), laid.styles.get(&parent))
+        else {
+            continue;
+        };
+        let width = (parent_rect.width
+            - parent_style.padding.left
+            - parent_style.padding.right
+            - parent_style.border.left
+            - parent_style.border.right)
+            .max(0.0);
+        if width > 0.0 {
+            overrides.insert(*id, width);
+        }
+    }
+    overrides
+}
+
+/// Re-run layout with the previous pass's parent content widths so percentage
+/// calc() sizes resolve against real geometry instead of 0. Converges in one
+/// or two passes and is skipped entirely for pages without such declarations.
+#[allow(clippy::too_many_arguments)]
+fn refine_percentage_widths(
+    mut laid: DomLayout,
+    tree: &DomTree,
+    viewport: (f32, f32),
+    intrinsic: &ReplacedIntrinsicMap,
+    fonts: &[crate::inline::WebFont],
+    sheet: &crate::css::Stylesheet,
+    shadow_sheets: &HashMap<NodeId, std::sync::Arc<crate::css::Stylesheet>>,
+    animation_sample: crate::AnimationSample,
+    animation_timeline: &mut crate::AnimationTimelineState,
+) -> DomLayout {
+    // Correction passes must not advance the animation clock: they only
+    // recompute geometry for percentage sizes. Snapshot the timeline so the
+    // extra pass sees exactly the state the real pass saw, and restore it
+    // afterwards so animation start/stop history is unchanged.
+    let timeline_before = animation_timeline.clone();
+    for _ in 0..2 {
+        *animation_timeline = timeline_before.clone();
+        let overrides = percentage_width_overrides(&laid, tree);
+        if overrides.is_empty() {
+            break;
+        }
+        let (next, _, _, _) = layout_dom_once(
+            tree,
+            viewport,
+            intrinsic,
+            fonts,
+            sheet,
+            shadow_sheets,
+            None,
+            None,
+            animation_sample,
+            animation_timeline,
+            Some(&overrides),
+        );
+        let changed = laid.rects.len() != next.rects.len()
+            || laid.rects.iter().any(|(id, rect)| {
+                next.rects
+                    .get(id)
+                    .is_some_and(|next| (next.width - rect.width).abs() > 0.5)
+            });
+        laid = next;
+        if !changed {
+            break;
+        }
+    }
+    *animation_timeline = timeline_before;
+    laid
+}
+
 fn layout_dom_once(
     tree: &DomTree,
     viewport: (f32, f32),
@@ -5288,6 +5422,7 @@ fn layout_dom_once(
     retained: Option<(RetainedStyleMaps, HashSet<NodeId>)>,
     animation_sample: crate::AnimationSample,
     animation_timeline: &mut crate::AnimationTimelineState,
+    width_overrides: Option<&HashMap<NodeId, f32>>,
 ) -> (
     DomLayout,
     Option<crate::css::ContainerDecisionSignature>,
@@ -5708,7 +5843,9 @@ fn layout_dom_once(
                     if child_cb_height_definite {
                         definite_height_nodes.insert(id);
                     }
-                    let cb_w = inh.cb_width;
+                    let cb_w = width_overrides
+                        .and_then(|overrides| overrides.get(&id).copied())
+                        .unwrap_or(inh.cb_width);
                     let used_w = match style.width {
                         crate::Dimension::Px(width) => width,
                         crate::Dimension::Percent(percent) => percent * cb_w,
@@ -5932,7 +6069,9 @@ fn layout_dom_once(
                     };
                     style.line_height = Some(crate::LineHeight::Px(pixels));
                 }
-                let cb_w = inh.cb_width;
+                let cb_w = width_overrides
+                        .and_then(|overrides| overrides.get(&id).copied())
+                        .unwrap_or(inh.cb_width);
                 for index in 0..6 {
                     let Some(expression) = style.size_expressions[index].as_deref() else {
                         continue;
