@@ -10073,7 +10073,14 @@ fn paint_positioned_pseudo(
     image_cache: &mut RenderResourceCache,
     raster_scale: f32,
 ) {
-    if style.position != Some(taffy::Position::Absolute) {
+    if style.position != Some(taffy::Position::Absolute)
+        || style.display == crate::Display::None
+    {
+        // `display: none` pseudo-elements are not generated boxes and must not
+        // paint. Ant Design's `.ant-btn::before` ripple overlay is positioned
+        // with a white background but hidden with `display: none`; without this
+        // guard it painted an opaque white box over the whole button, erasing
+        // the button's own background colour.
         return;
     }
     let em = style.font_size.unwrap_or(16.0);
@@ -20324,6 +20331,29 @@ mod tests {
         );
         let latin = crate::paint::measure_text("ab", 16.0, false, None);
         assert!(latin > 10.0 && latin < 25.0, "latin measurement regressed: {latin}");
+    }
+
+    #[test]
+    fn positioned_display_none_pseudo_does_not_cover_the_host_background() {
+        // Ant Design's `.ant-btn::before` ripple overlay is `position:absolute`
+        // with a white background but `display:none`; it must not paint. Before
+        // the guard in `paint_positioned_pseudo` it drew an opaque white box
+        // over the button, erasing the host's own background colour entirely.
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:#fff">
+                <style>
+                .b { position: relative; width: 60px; height: 30px; background: #55a722; }
+                .b::before { position: absolute; inset: 0; content: ""; background: #fff; display: none; }
+                </style>
+                <div class="b"></div>
+                </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (100.0, 60.0), None).expect("pixmap");
+        let p = pixmap.pixel(30, 15).expect("sample pixel");
+        assert!(
+            p.green() > 120 && p.red() < 140,
+            "display:none positioned ::before must not cover the host background, got {p:?}"
+        );
     }
 
     #[test]
