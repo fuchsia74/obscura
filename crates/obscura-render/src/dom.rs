@@ -5706,12 +5706,31 @@ fn layout_dom_once(
                             && rendered_parent(tree, id)
                                 .and_then(|parent| styles.get(&parent))
                                 .is_some_and(|parent| {
+                                    let column = matches!(parent.flex_direction, Some(
+                                        taffy::FlexDirection::Column
+                                            | taffy::FlexDirection::ColumnReverse
+                                    ));
+                                    // CSS Flexbox 9.8: a flex item that is stretched in
+                                    // the cross axis of a container with a definite
+                                    // cross size has a definite size, so a percentage
+                                    // height on its children resolves against it. In a
+                                    // row container the cross axis is the block axis.
+                                    let stretched_in_row = !column
+                                        && inh.cb_height_definite
+                                        && styles.get(&id).is_some_and(|item| {
+                                            let stretches = |value: taffy::AlignItems| {
+                                                value == taffy::AlignItems::STRETCH
+                                                    || value == taffy::AlignItems::NORMAL
+                                            };
+                                            match item.align_self {
+                                                // `align-self: auto` defers to the container.
+                                                None => parent.align_items.map_or(true, stretches),
+                                                Some(own) => stretches(own),
+                                            }
+                                        });
                                     parent.display == crate::Display::Flex
                                         && !parent.internal_flex_container
-                                        && matches!(parent.flex_direction, Some(
-                                            taffy::FlexDirection::Column
-                                                | taffy::FlexDirection::ColumnReverse
-                                        ))
+                                        && (column || stretched_in_row)
                                 })
                     });
             let reused_computed_style = fresh_styles
@@ -17466,6 +17485,45 @@ mod tests {
             (cell.width - 290.0).abs() < 0.5,
             "calc(50% - 10px) inside a 600px panel should be 290px, got {cell:?}"
         );
+    }
+
+    #[test]
+    fn percentage_height_resolves_inside_a_stretched_row_flex_item() {
+        // CSS Flexbox 9.8: an item stretched across a definite cross size is
+        // itself definite, so `height:100%` on its child must resolve to it.
+        let cases = [
+            // default align-items (normal) stretches
+            r#"<style>html,body{margin:0}.flex{display:flex;height:1000px}.mid{flex:1 1 auto}.inner{height:100%}</style>
+               <div class="flex"><div id="mid" class="mid"><div id="inner" class="inner"></div></div></div>"#,
+            // explicit stretch
+            r#"<style>html,body{margin:0}.flex{display:flex;height:1000px;align-items:stretch}.inner{height:100%}</style>
+               <div class="flex"><div id="mid"><div id="inner" class="inner"></div></div></div>"#,
+            // align-self: stretch overriding a non-stretch container
+            r#"<style>html,body{margin:0}.flex{display:flex;height:1000px;align-items:center}.mid{align-self:stretch}.inner{height:100%}</style>
+               <div class="flex"><div id="mid" class="mid"><div id="inner" class="inner"></div></div></div>"#,
+        ];
+        for html in cases {
+            let tree = parse_html(html);
+            let laid = layout_dom(&tree, (800.0, 600.0));
+            let inner = laid.rects[&tree.get_element_by_id("inner").unwrap()];
+            assert!(
+                (inner.height - 1000.0).abs() < 0.5,
+                "height:100% in a stretched flex item should be 1000px, got {inner:?} for {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn percentage_height_stays_auto_in_a_non_stretched_row_flex_item() {
+        // A centered item is content-sized, so its child's percentage height
+        // has an indefinite containing block and must behave as auto.
+        let tree = parse_html(
+            r#"<style>html,body{margin:0}.flex{display:flex;height:1000px;align-items:center}.inner{height:100%}</style>
+               <div class="flex"><div id="mid"><div id="inner" class="inner"></div></div></div>"#,
+        );
+        let laid = layout_dom(&tree, (800.0, 600.0));
+        let inner = laid.rects[&tree.get_element_by_id("inner").unwrap()];
+        assert!(inner.height < 1.0, "indefinite percentage must be auto (0 for empty), got {inner:?}");
     }
 
     #[test]
