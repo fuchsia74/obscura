@@ -11376,34 +11376,56 @@ fn render_svg_with_font_database(
 /// frame capture. The embedded faces are the same stable browser-generic
 /// families used by the HTML text engine.
 fn svg_font_database() -> std::sync::Arc<usvg::fontdb::Database> {
-    static DATABASE: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    std::sync::Arc::clone(DATABASE.get_or_init(|| {
-        let mut database = usvg::fontdb::Database::new();
-        for bytes in [
-            FONT_BYTES,
-            FONT_BOLD_BYTES,
-            FONT_OBLIQUE_BYTES,
-            FONT_BOLD_OBLIQUE_BYTES,
-            SERIF_FONT_BYTES,
-            MONO_FONT_BYTES,
-            // The Liberation families stop at Latin/Greek/Cyrillic: an SVG
-            // text run with a symbol glyph (★/U+2605 and friends) had no face
-            // covering it anywhere in the database, so usvg's per-glyph
-            // fallback dropped the glyph and warned per character (#701).
-            // DejaVu Sans is the same embedded broad-coverage face the HTML
-            // engine already keeps for `system-ui`; family selection is
-            // unchanged (Liberation stays the sans/serif/mono default), it
-            // only extends what the fallback search can find.
-            SYSTEM_FONT_BYTES,
-        ] {
-            database.load_font_data(bytes.to_vec());
-        }
-        database.set_sans_serif_family("Liberation Sans");
-        database.set_serif_family("Liberation Serif");
-        database.set_monospace_family("Liberation Mono");
-        std::sync::Arc::new(database)
-    }))
+    static DATABASE: std::sync::OnceLock<
+        std::sync::Mutex<(usize, std::sync::Arc<usvg::fontdb::Database>)>,
+    > = std::sync::OnceLock::new();
+    let user_fonts = crate::inline::user_font_data();
+    let cache = DATABASE.get_or_init(|| {
+        std::sync::Mutex::new((usize::MAX, std::sync::Arc::new(usvg::fontdb::Database::new())))
+    });
+    let mut cache = cache.lock().unwrap();
+    if cache.0 != user_fonts.len() {
+        *cache = (user_fonts.len(), std::sync::Arc::new(build_svg_font_database(&user_fonts)));
+    }
+    std::sync::Arc::clone(&cache.1)
+}
+
+fn build_svg_font_database(
+    user_fonts: &[std::sync::Arc<Vec<u8>>],
+) -> usvg::fontdb::Database {
+    let mut database = usvg::fontdb::Database::new();
+    for bytes in [
+        FONT_BYTES,
+        FONT_BOLD_BYTES,
+        FONT_OBLIQUE_BYTES,
+        FONT_BOLD_OBLIQUE_BYTES,
+        SERIF_FONT_BYTES,
+        MONO_FONT_BYTES,
+        // The Liberation families stop at Latin/Greek/Cyrillic: an SVG
+        // text run with a symbol glyph (★/U+2605 and friends) had no face
+        // covering it anywhere in the database, so usvg's per-glyph
+        // fallback dropped the glyph and warned per character (#701).
+        // DejaVu Sans is the same embedded broad-coverage face the HTML
+        // engine already keeps for `system-ui`; family selection is
+        // unchanged (Liberation stays the sans/serif/mono default), it
+        // only extends what the fallback search can find.
+        SYSTEM_FONT_BYTES,
+    ] {
+        database.load_font_data(bytes.to_vec());
+    }
+    // Fonts the caller supplied through --font-dir (CJK, brand faces, ...)
+    // were only visible to the HTML shaper. SVG <text> therefore rendered
+    // tofu for CJK runs on pages whose icons carry Chinese labels (for
+    // example an "智能客服" launcher), while the same text shaped fine in the
+    // DOM. Loading them here extends usvg's per-glyph fallback to those
+    // faces without changing the bundled family defaults.
+    for bytes in user_fonts {
+        database.load_font_data((**bytes).clone());
+    }
+    database.set_sans_serif_family("Liberation Sans");
+    database.set_serif_family("Liberation Serif");
+    database.set_monospace_family("Liberation Mono");
+    database
 }
 
 fn svg_font_database_with_web_fonts(

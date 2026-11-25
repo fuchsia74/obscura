@@ -258,6 +258,20 @@ pub fn configure_font_directories(directories: Vec<PathBuf>) -> bool {
     FONT_DIRECTORIES.set(directories).is_ok()
 }
 
+/// Fonts loaded from `--font-dir`/page font directories, retained so the SVG
+/// rasterizer can fall back to them for glyphs the bundled faces lack.
+static USER_FONT_BYTES: std::sync::OnceLock<
+    std::sync::Mutex<Vec<std::sync::Arc<Vec<u8>>>>,
+> = std::sync::OnceLock::new();
+
+/// Snapshot of the user-provided font bytes, for the SVG font database.
+pub(crate) fn user_font_data() -> Vec<std::sync::Arc<Vec<u8>>> {
+    USER_FONT_BYTES
+        .get()
+        .and_then(|fonts| fonts.lock().ok().map(|fonts| fonts.clone()))
+        .unwrap_or_default()
+}
+
 fn load_font_directories(
     database: &mut cosmic_text::fontdb::Database,
     directories: &[PathBuf],
@@ -301,7 +315,17 @@ fn load_font_directories(
         let Ok(data) = std::fs::read(path) else {
             continue;
         };
-        ids.extend(database.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(data))));
+        let data = Arc::new(data);
+        {
+            let registry =
+                USER_FONT_BYTES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+            if let Ok(mut registry) = registry.lock() {
+                if !registry.iter().any(|existing| Arc::ptr_eq(existing, &data)) {
+                    registry.push(Arc::clone(&data));
+                }
+            }
+        }
+        ids.extend(database.load_font_source(cosmic_text::fontdb::Source::Binary(data)));
     }
     ids
 }
