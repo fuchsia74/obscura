@@ -2109,6 +2109,7 @@ dependencies = [
  "obscura-dom",
  "obscura-net",
  "obscura-render",
+ "obscura-ssrf",
  "pbkdf2",
  "psl",
  "reqwest",

@@ -7,7 +7,9 @@
 //! images and fonts) both enforce the same deny-set from here, so the checks
 //! can never disagree.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Process-wide opt-in via env var. Older flow that issue #4 introduced. The
 /// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
@@ -136,4 +138,94 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || (s[0] == 0x3fff && s[1] & 0xf000 == 0)
         }
     }
+}
+
+
+/// Optional per-origin in-flight request cap shared by every transport in the
+/// process (async reqwest navigation/API traffic and the renderer's blocking
+/// image loader). Mirrors a browser's per-host connection limit.
+///
+/// `OBSCURA_MAX_CONN_PER_HOST=12` enables the cap; unset, `0`, or a
+/// non-numeric value leaves it disabled.
+pub fn max_connections_per_host() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("OBSCURA_MAX_CONN_PER_HOST")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Counting gate for one origin.
+pub struct ConnectionGate {
+    limit: usize,
+    in_use: Mutex<usize>,
+    released: Condvar,
+}
+
+/// RAII permit; dropping it wakes one waiter.
+pub struct ConnectionPermit {
+    gate: Arc<ConnectionGate>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        if let Ok(mut in_use) = self.gate.in_use.lock() {
+            *in_use = in_use.saturating_sub(1);
+        }
+        self.gate.released.notify_one();
+    }
+}
+
+impl ConnectionGate {
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Non-blocking attempt, for async contexts that poll and yield.
+    pub fn try_acquire(self: &Arc<Self>) -> Option<ConnectionPermit> {
+        let mut in_use = self.in_use.lock().unwrap();
+        if *in_use < self.limit {
+            *in_use += 1;
+            Some(ConnectionPermit { gate: Arc::clone(self) })
+        } else {
+            None
+        }
+    }
+
+    /// Blocking acquire, for synchronous transports (the renderer's ureq
+    /// image loader already blocks on I/O in this thread).
+    pub fn acquire(self: &Arc<Self>) -> ConnectionPermit {
+        let mut in_use = self.in_use.lock().unwrap();
+        while *in_use >= self.limit {
+            in_use = self.released.wait(in_use).unwrap();
+        }
+        *in_use += 1;
+        ConnectionPermit { gate: Arc::clone(self) }
+    }
+}
+
+/// Process-wide gate for `host`, or `None` when the cap is disabled.
+pub fn host_gate(host: &str) -> Option<Arc<ConnectionGate>> {
+    let limit = max_connections_per_host();
+    if limit == 0 {
+        return None;
+    }
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<ConnectionGate>>>> = OnceLock::new();
+    let gates = GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = host.trim().to_ascii_lowercase();
+    let mut gates = gates.lock().unwrap();
+    Some(
+        gates
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(ConnectionGate {
+                    limit,
+                    in_use: Mutex::new(0),
+                    released: Condvar::new(),
+                })
+            })
+            .clone(),
+    )
 }

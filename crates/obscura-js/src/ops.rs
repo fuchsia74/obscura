@@ -5101,6 +5101,10 @@ async fn fetch_url_inner(
     let mut redirected_from = Vec::new();
     let mut crossed_origin = is_cross_origin;
     let cookie_initiator = url::Url::parse(&page_origin).ok();
+    // Count scripted fetch/XHR against the same per-host gate as navigation
+    // and the renderer, so a dashboard firing a dozen API calls in parallel
+    // cannot exceed the configured connection cap.
+    let mut fetch_gate_permit: Option<obscura_ssrf::ConnectionPermit> = None;
     let response = loop {
         let mut req = client
             .request(current_method.clone(), &current_url)
@@ -5149,6 +5153,20 @@ async fn fetch_url_inner(
         if !current_body.is_empty() {
             req = req.body(current_body.clone());
         }
+
+        fetch_gate_permit = match url::Url::parse(&current_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .and_then(|host| obscura_ssrf::host_gate(&host))
+        {
+            Some(gate) => loop {
+                if let Some(permit) = gate.try_acquire() {
+                    break Some(permit);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            },
+            None => None,
+        };
 
         let resp = {
             let _in_flight = in_flight.as_ref().map(|counter| {
@@ -5327,6 +5345,7 @@ async fn fetch_url_inner(
     let body = Box::pin(async move {
         let _page_in_flight = _page_in_flight;
         let mut network_guard = network_guard;
+        let _host_permit = fetch_gate_permit;
         let resp_bytes = read_body_capped(response, fetch_max_body_bytes()).await?;
         if let Some(ref cbs) = callbacks {
             if cbs.has_response_callbacks().await {

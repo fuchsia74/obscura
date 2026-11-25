@@ -1193,7 +1193,16 @@ impl ObscuraHttpClient {
             let mut builder = Client::builder()
                 .redirect(Policy::none())
                 .timeout(self.timeout)
-                .danger_accept_invalid_certs(false)
+                .danger_accept_invalid_certs(std::env::var_os("OBSCURA_TLS_INSECURE").is_some())
+                // With a per-host connection cap configured, do not keep idle
+                // keep-alive sockets around: an origin's connection limit
+                // counts idle sockets too, and a pool of them would defeat the
+                // concurrency gate. Without a cap, keep reqwest's defaults.
+                .pool_max_idle_per_host(if obscura_ssrf::max_connections_per_host() > 0 {
+                    0
+                } else {
+                    usize::MAX
+                })
                 // Read a folded header line (obs-fold) as browsers do instead of
                 // failing the response.
                 .http1_allow_obsolete_multiline_headers_in_responses(true)
@@ -1745,6 +1754,22 @@ impl ObscuraHttpClient {
                 req_builder = req_builder.body(b.clone());
             }
 
+            // Mirror a browser's per-host connection cap: hold a permit for
+            // the whole request (send + body read) so a burst of subresources
+            // cannot open more connections to one origin than configured.
+            // Shared with the renderer's blocking image loader via
+            // `obscura_ssrf::host_gate`, so both transports count together.
+            let _host_permit = match obscura_ssrf::host_gate(
+                current_url.host_str().unwrap_or_default(),
+            ) {
+                Some(gate) => loop {
+                    if let Some(permit) = gate.try_acquire() {
+                        break Some(permit);
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                },
+                None => None,
+            };
             let in_flight = InFlightGuard::new(&self.in_flight);
             let resp = req_builder.send().await.map_err(|e| {
                 request_error(&current_url, &e)

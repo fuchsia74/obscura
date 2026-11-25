@@ -8463,6 +8463,15 @@ fn split_css_top_level(value: &str, separator: char) -> Vec<&str> {
 /// the burst) came back blank, and the failure was cached permanently. The
 /// backoff both recovers them and paces the burst back under the limit.
 fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
+    // Count this image fetch against the same process-wide per-host gate the
+    // async page transport uses. Without this the renderer could open its own
+    // ~16 simultaneous image connections on top of the page's requests and
+    // exceed an origin's connection limit even when the client cap is set.
+    let _host_permit = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .and_then(|host| obscura_ssrf::host_gate(&host))
+        .map(|gate| gate.acquire());
     let mut backoff = std::time::Duration::from_millis(200);
     for attempt in 0..3 {
         // Advertise only formats that this build can decode. Content-negotiating
@@ -8512,7 +8521,7 @@ fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
 fn image_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
+        let mut builder = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(10))
             // Present the same normal browser identity the engine uses for the
             // document. A bot-identifying UA got image requests filtered by CDNs
@@ -8520,8 +8529,13 @@ fn image_agent() -> &'static ureq::Agent {
             // cnbc, techcrunch, arstechnica), so the images Chrome loads came
             // back blank; a real browser UA loads the same bytes Chrome does.
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
-            .resolver(SsrfGuardResolver)
-            .build()
+            .resolver(SsrfGuardResolver);
+        // Same reasoning as the async client: when a per-host connection cap
+        // is configured, keep-alive sockets must not accumulate past it.
+        if obscura_ssrf::max_connections_per_host() > 0 {
+            builder = builder.max_idle_connections(0);
+        }
+        builder.build()
     })
 }
 

@@ -21,6 +21,7 @@ deno_core = "0.412"
 
 [dependencies]
 obscura-dom = { workspace = true }
+obscura-ssrf = { workspace = true }
 obscura-net = { workspace = true }
 deno_core = "0.412"
 tokio = { workspace = true }
