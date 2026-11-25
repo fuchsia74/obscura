@@ -5956,6 +5956,15 @@ fn layout_dom_once(
                             continue;
                         }
                     }
+                    // A percentage min/max width resolved against an indefinite containing
+                    // block (cb_width == 0) collapses to "0% - Npx", often a
+                    // negative value. Leaving it unresolved lets layout use the
+                    // automatic minimum size, which is what browsers do: flex
+                    // items size to min-content and wrap instead of shrinking to
+                    // a quarter width and ellipsizing CJK labels.
+                    if matches!(index, 2 | 4) && cb_w <= 0.0 && expression.contains('%') {
+                        continue;
+                    }
                     let percent_base = if matches!(index, 1 | 3 | 5) {
                         if inh.cb_height_definite {
                             inh.cb_height
@@ -5975,6 +5984,14 @@ fn layout_dom_once(
                     ) else {
                         continue;
                     };
+                    // min-width/max-width can never be negative. A negative
+                    // result means the percentage was resolved against a
+                    // containing block that was not laid out yet; keeping the
+                    // declaration unresolved makes the automatic minimum size
+                    // apply, so flex items wrap instead of shrinking.
+                    if matches!(index, 2 | 4) && px < 0.0 {
+                        continue;
+                    }
                     let resolved = crate::Dimension::Px(px);
                     match index {
                         0 => style.width = resolved,
