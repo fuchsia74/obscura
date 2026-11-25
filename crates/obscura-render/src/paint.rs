@@ -7892,6 +7892,32 @@ fn native_font_scale(font: &FontRef<'_>, size: f32) -> PxScale {
     PxScale::from(size)
 }
 
+/// East Asian characters that occupy a full em in their own font. The bundled
+/// Latin faces have no glyph for them, so `glyph_id` returns 0 (`.notdef`) and
+/// its advance is roughly half an em: measuring two CJK characters as 16px
+/// instead of ~37px at 16px font-size. Intrinsic sizing (auto-width buttons,
+/// max-content tables) then disagrees with the shaped layout, which does find a
+/// CJK face through the font database.
+fn is_full_width_char(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xA960..=0xA97F
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD)
+}
+
 pub fn measure_text(text: &str, size: f32, is_bold: bool, family: Option<&str>) -> f32 {
     let font = FontRef::try_from_slice(crate::inline::bundled_font_bytes(family, is_bold)).unwrap();
     let scaled_font = font.as_scaled(native_font_scale(&font, size));
@@ -7905,7 +7931,13 @@ pub fn measure_text(text: &str, size: f32, is_bold: bool, family: Option<&str>) 
         if let Some(previous) = previous {
             width += scaled_font.kern(previous, glyph);
         }
-        width += scaled_font.h_advance(glyph);
+        // Missing glyph: use the character's typical advance rather than the
+        // font's `.notdef` box, which is far narrower than a CJK face.
+        width += if glyph.0 == 0 && is_full_width_char(c) {
+            size
+        } else {
+            scaled_font.h_advance(glyph)
+        };
         previous = Some(glyph);
     }
     width
@@ -20054,6 +20086,21 @@ mod tests {
             pixel.red() > 200 && pixel.blue() < 60,
             "z-index:auto positioned box must paint above the later in-flow block: {pixel:?}"
         );
+    }
+
+    #[test]
+    fn measure_text_uses_a_full_width_advance_for_cjk_without_bundled_glyphs() {
+        // The bundled Latin faces have no CJK glyph; measuring them through
+        // `.notdef` made two characters ~16px instead of ~32px at 16px, so
+        // intrinsic sizing disagreed with the shaped layout (a CJK button
+        // measured 48px where Chromium gives 69px).
+        let cjk = crate::paint::measure_text("\u{914d}\u{7f6e}", 16.0, false, None);
+        assert!(
+            (cjk - 32.0).abs() < 1.0,
+            "two full-width characters should measure ~2em, got {cjk}"
+        );
+        let latin = crate::paint::measure_text("ab", 16.0, false, None);
+        assert!(latin > 10.0 && latin < 25.0, "latin measurement regressed: {latin}");
     }
 
     #[test]
