@@ -10160,6 +10160,12 @@ fn paint_positioned_pseudo(
         // the button's own background colour.
         return;
     }
+    // An opacity of zero (or less) keeps the generated box fully transparent.
+    // Ant Design gates a checked radio's inner dot on `opacity: 0`/`1`; without
+    // this the dot painted on every radio, not just the selected one.
+    if style.opacity.is_some_and(|value| value <= 0.0) {
+        return;
+    }
     let em = style.font_size.unwrap_or(16.0);
     let resolve = |dimension: crate::Dimension, basis: f32| match dimension.resolve(
         em,
@@ -10197,22 +10203,51 @@ fn paint_positioned_pseudo(
     if width <= 0.0 || height <= 0.0 {
         return;
     }
+    // `left`/`right`/`top`/`bottom` position the pseudo's margin box, so the
+    // border box is offset further by the margin edges. Normal absolutely
+    // positioned elements get this from taffy; the hand-laid-out pseudo box
+    // must add it explicitly (Ant Design centers a radio dot with a negative
+    // margin, which would otherwise sit at the box's top-left corner).
     let x = left
-        .map(|value| containing_block.x + value)
-        .or_else(|| right.map(|value| containing_block.x + containing_block.width - value - width))
+        .map(|value| containing_block.x + value + style.margin.left)
+        .or_else(|| {
+            right.map(|value| {
+                containing_block.x + containing_block.width - value - style.margin.right - width
+            })
+        })
         .unwrap_or(static_position_rect.x);
     let y = top
-        .map(|value| containing_block.y + value)
+        .map(|value| containing_block.y + value + style.margin.top)
         .or_else(|| {
-            bottom.map(|value| containing_block.y + containing_block.height - value - height)
+            bottom.map(|value| {
+                containing_block.y + containing_block.height - value - style.margin.bottom - height
+            })
         })
         .unwrap_or(static_position_rect.y);
-    let rect = crate::Rect {
+    let mut rect = crate::Rect {
         x,
         y,
         width,
         height,
     };
+    // Apply a lone `scale(sx, sy)` around the box centre (the default
+    // `transform-origin`). Real elements route the full transform list through
+    // the layer compositor; a checked radio's dot uses a single `scale(.5)`,
+    // which is the common case worth covering here so the dot is half-size
+    // instead of filling the whole control.
+    if let [crate::TransformOp::Scale(sx, sy)] = style.transform_ops.as_slice() {
+        let (sx, sy) = (*sx, *sy);
+        if sx > 0.0 && sy > 0.0 {
+            let center_x = rect.x + rect.width / 2.0;
+            let center_y = rect.y + rect.height / 2.0;
+            let scaled_width = rect.width * sx;
+            let scaled_height = rect.height * sy;
+            rect.x = center_x - scaled_width / 2.0;
+            rect.y = center_y - scaled_height / 2.0;
+            rect.width = scaled_width;
+            rect.height = scaled_height;
+        }
+    }
     let ancestor_clip = ancestor_overflow_clip.map(|clip| clip.viewport_rect(clip_extent));
     let visible = match ancestor_clip {
         Some(clip) => rect.intersect(&clip),
