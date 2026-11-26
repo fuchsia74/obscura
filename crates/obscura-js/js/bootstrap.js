@@ -17349,7 +17349,7 @@ class _Canvas2D {
   moveTo(x, y) { if (this._path) this._path.push({t:'M',x,y}); }
   lineTo(x, y) { if (this._path) this._path.push({t:'L',x,y}); }
   bezierCurveTo() {} quadraticCurveTo() {}
-  arc(x, y, r, s, e) { if (this._path) this._path.push({t:'A',x,y,r}); }
+  arc(x, y, r, s, e, ccw) { if (this._path) this._path.push({t:'A',x,y,r,s,e,ccw:!!ccw}); }
   arcTo() {}
   rect(x, y, w, h) { this.fillRect(x, y, w, h); }
   fill() {
@@ -17359,39 +17359,66 @@ class _Canvas2D {
       const c = style.at(px, py);
       this._setPixel(px, py, c[0], c[1], c[2], c[3]);
     };
-    // Polygon fill: the old code only handled arcs, so a path built from
-    // moveTo/lineTo (area charts, wedges, any closed shape) filled nothing.
-    // Even-odd scanline over the M/L vertices, arcs still handled below.
-    const poly = this._path.filter((s) => s.t === 'M' || s.t === 'L');
-    if (poly.length >= 3) {
-      let minY = Infinity, maxY = -Infinity;
-      for (const p of poly) { if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
-      minY = Math.max(0, Math.round(minY)); maxY = Math.min(this._h - 1, Math.round(maxY));
-      for (let py = minY; py <= maxY; py++) {
-        const xs = [];
-        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-          const a = poly[i], b = poly[j];
-          if ((a.y > py) !== (b.y > py)) {
-            xs.push(a.x + ((py - a.y) / (b.y - a.y)) * (b.x - a.x));
-          }
+    // Build closed contours from the full path (moveTo/lineTo/arc/closePath).
+    // Arcs are sampled into polylines honouring their start/end angles and
+    // direction, so an annular gauge (outer arc + reversed inner arc) fills as
+    // a band with a hole rather than a solid disc.
+    const contours = [];
+    let contour = null;
+    let curX = 0, curY = 0;
+    const startContour = (x, y) => { contour = [{ x, y }]; contours.push(contour); curX = x; curY = y; };
+    const addPoint = (x, y) => { if (contour) { contour.push({ x, y }); curX = x; curY = y; } };
+    for (const seg of this._path) {
+      if (seg.t === 'M') {
+        startContour(seg.x, seg.y);
+      } else if (seg.t === 'L') {
+        if (!contour) startContour(seg.x, seg.y);
+        else addPoint(seg.x, seg.y);
+      } else if (seg.t === 'A') {
+        let sweep = seg.ccw ? (seg.s - seg.e) : (seg.e - seg.s);
+        if (sweep < 0) sweep += Math.PI * 2;
+        const steps = Math.max(6, Math.ceil(sweep / (Math.PI / 24)));
+        const pts = [];
+        for (let i = 0; i <= steps; i++) {
+          const a = seg.ccw ? seg.s - sweep * (i / steps) : seg.s + sweep * (i / steps);
+          pts.push({ x: seg.x + Math.cos(a) * seg.r, y: seg.y + Math.sin(a) * seg.r });
         }
-        xs.sort((m, n) => m - n);
-        for (let k = 0; k + 1 < xs.length; k += 2) {
-          const from = Math.max(0, Math.round(xs[k]));
-          const to = Math.min(this._w - 1, Math.round(xs[k+1]));
-          for (let px = from; px <= to; px++) put(px, py);
+        if (!contour) {
+          startContour(pts[0].x, pts[0].y);
+        } else if (curX !== pts[0].x || curY !== pts[0].y) {
+          addPoint(pts[0].x, pts[0].y);
         }
+        for (let i = 1; i < pts.length; i++) addPoint(pts[i].x, pts[i].y);
+      } else if (seg.t === 'Z') {
+        if (contour && contour.length) addPoint(contour[0].x, contour[0].y);
+        contour = null;
       }
     }
-    for (const seg of this._path) {
-      if (seg.t === 'A') {
-        const cx = Math.round(seg.x), cy = Math.round(seg.y), rad = seg.r;
-        const r2 = rad * rad;
-        for (let py = Math.max(0, cy - rad); py <= Math.min(this._h - 1, cy + rad); py++) {
-          for (let px = Math.max(0, cx - rad); px <= Math.min(this._w - 1, cx + rad); px++) {
-            if ((px-cx)*(px-cx) + (py-cy)*(py-cy) <= r2) put(px, py);
-          }
+    // Even-odd scanline over the combined contour edges so nested subpaths
+    // punch holes (annulus) rather than painting over each other.
+    let minY = Infinity, maxY = -Infinity;
+    const edges = [];
+    for (const poly of contours) {
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        edges.push([a, b]);
+        if (a.y < minY) minY = a.y;
+        if (a.y > maxY) maxY = a.y;
+      }
+    }
+    minY = Math.max(0, Math.round(minY)); maxY = Math.min(this._h - 1, Math.round(maxY));
+    for (let py = minY; py <= maxY; py++) {
+      const xs = [];
+      for (const [a, b] of edges) {
+        if ((a.y > py) !== (b.y > py)) {
+          xs.push(a.x + ((py - a.y) / (b.y - a.y)) * (b.x - a.x));
         }
+      }
+      xs.sort((m, n) => m - n);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const from = Math.max(0, Math.round(xs[k]));
+        const to = Math.min(this._w - 1, Math.round(xs[k + 1]));
+        for (let px = from; px <= to; px++) put(px, py);
       }
     }
     this._path = [];
@@ -17435,15 +17462,17 @@ class _Canvas2D {
       if (seg.t === 'M') { cur = seg; sub = seg; }
       else if (seg.t === 'L') { if (cur) segment(cur.x, cur.y, seg.x, seg.y); cur = seg; }
       else if (seg.t === 'A') {
-        const steps = Math.max(24, Math.round(seg.r * 8));
-        let prev = null;
+        let sweep = seg.ccw ? (seg.s - seg.e) : (seg.e - seg.s);
+        if (sweep < 0) sweep += Math.PI * 2;
+        const steps = Math.max(8, Math.round(sweep * 8));
+        const pts = [];
         for (let i = 0; i <= steps; i++) {
-          const a = (i / steps) * Math.PI * 2;
-          const p = { x: seg.x + Math.cos(a) * seg.r, y: seg.y + Math.sin(a) * seg.r };
-          if (prev) segment(prev.x, prev.y, p.x, p.y);
-          prev = p;
+          const a = seg.ccw ? seg.s - sweep * (i / steps) : seg.s + sweep * (i / steps);
+          pts.push({ x: seg.x + Math.cos(a) * seg.r, y: seg.y + Math.sin(a) * seg.r });
         }
-        cur = seg;
+        if (cur) segment(cur.x, cur.y, pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) segment(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+        cur = pts[pts.length - 1];
       } else if (seg.t === 'Z') { if (cur && sub) segment(cur.x, cur.y, sub.x, sub.y); cur = sub; }
     }
     this._markPaintDamage();
