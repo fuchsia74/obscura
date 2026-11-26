@@ -3131,9 +3131,42 @@ pub fn paint_dom_scrolled_at_animation_time_with_surface_color_and_resources(
     surface_color: [u8; 4],
     resources: &mut RenderResourceCache,
 ) -> Option<Pixmap> {
+    paint_dom_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
+        tree,
+        viewport,
+        base_url,
+        scroll,
+        animation_sample_time,
+        surface_color,
+        resources,
+        &EMPTY_CANVAS_SURFACES,
+    )
+}
+
+/// As [`paint_dom_scrolled_at_animation_time_with_surface_color_and_resources`],
+/// but composites live [`CanvasSurfaceSource`] bitmaps (e.g. 2D canvas) into
+/// the capture. The unprepared/fallback capture path must keep parity with the
+/// prepared path, which already threads canvas surfaces through.
+pub fn paint_dom_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
+    tree: &DomTree,
+    viewport: (f32, f32),
+    base_url: Option<&str>,
+    scroll: (f32, f32),
+    animation_sample_time: crate::AnimationSampleTime,
+    surface_color: [u8; 4],
+    resources: &mut RenderResourceCache,
+    canvas_surfaces: &dyn CanvasSurfaceSource,
+) -> Option<Pixmap> {
     let mut prepared =
         prepare_dom_at_animation_time(tree, viewport, base_url, resources, animation_sample_time)?;
-    paint_prepared_with_surface_color(tree, &mut prepared, resources, scroll, surface_color)
+    paint_prepared_with_surface_color_and_canvas_surfaces(
+        tree,
+        &mut prepared,
+        resources,
+        scroll,
+        surface_color,
+        canvas_surfaces,
+    )
 }
 
 /// Resolve image candidates and web fonts, then create the single final layout
@@ -3771,6 +3804,24 @@ fn paint_prepared_with_surface_color(
     scroll: (f32, f32),
     surface_color: [u8; 4],
 ) -> Option<Pixmap> {
+    paint_prepared_with_surface_color_and_canvas_surfaces(
+        tree,
+        prepared,
+        resources,
+        scroll,
+        surface_color,
+        &EMPTY_CANVAS_SURFACES,
+    )
+}
+
+fn paint_prepared_with_surface_color_and_canvas_surfaces(
+    tree: &DomTree,
+    prepared: &mut PreparedRender,
+    resources: &mut RenderResourceCache,
+    scroll: (f32, f32),
+    surface_color: [u8; 4],
+    canvas_surfaces: &dyn CanvasSurfaceSource,
+) -> Option<Pixmap> {
     validate_capture_region(CaptureRegion::new(
         scroll.0,
         scroll.1,
@@ -3798,7 +3849,7 @@ fn paint_prepared_with_surface_color(
         pixmap,
         resources,
         &prepared.selected_images,
-        &EMPTY_CANVAS_SURFACES,
+        canvas_surfaces,
         &prepared.svg_fonts,
         prepared.content_size,
         &prepared.viewport_fixed,
@@ -7572,7 +7623,7 @@ pub fn screenshot_png_scrolled_at_animation_time_with_surface_color_and_resource
     surface_color: [u8; 4],
     resources: &mut RenderResourceCache,
 ) -> Option<Vec<u8>> {
-    paint_dom_scrolled_at_animation_time_with_surface_color_and_resources(
+    screenshot_png_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
         tree,
         viewport,
         base_url,
@@ -7580,6 +7631,32 @@ pub fn screenshot_png_scrolled_at_animation_time_with_surface_color_and_resource
         animation_sample_time,
         surface_color,
         resources,
+        &EMPTY_CANVAS_SURFACES,
+    )
+}
+
+/// PNG wrapper for the unprepared capture path that also composites live
+/// canvas surfaces. SPA hash changes bypass the prepared render (its base URL
+/// no longer matches), so the fallback path must carry canvas pixels too.
+pub fn screenshot_png_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
+    tree: &DomTree,
+    viewport: (f32, f32),
+    base_url: Option<&str>,
+    scroll: (f32, f32),
+    animation_sample_time: crate::AnimationSampleTime,
+    surface_color: [u8; 4],
+    resources: &mut RenderResourceCache,
+    canvas_surfaces: &dyn CanvasSurfaceSource,
+) -> Option<Vec<u8>> {
+    paint_dom_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
+        tree,
+        viewport,
+        base_url,
+        scroll,
+        animation_sample_time,
+        surface_color,
+        resources,
+        canvas_surfaces,
     )
     .and_then(|pixmap| pixmap.encode_png().ok())
 }

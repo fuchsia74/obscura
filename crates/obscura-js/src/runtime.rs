@@ -1938,6 +1938,7 @@ impl ObscuraJsRuntime {
             render_resources,
             render_media,
             dynamic_fonts,
+            canvas_surfaces,
             ..
         } = &mut *state;
         // An ad-hoc capture must select the same preference rules as CSSOM.
@@ -1957,7 +1958,7 @@ impl ObscuraJsRuntime {
                 tree, &mut prepared, render_resources, &resolved, surface_color,
             );
         }
-        obscura_render::screenshot_png_scrolled_at_animation_time_with_surface_color_and_resources(
+        obscura_render::screenshot_png_scrolled_at_animation_time_with_surface_color_and_resources_and_canvas_surfaces(
             dom.as_ref()?,
             viewport,
             base_url,
@@ -1965,6 +1966,7 @@ impl ObscuraJsRuntime {
             animation_sample_time,
             surface_color,
             render_resources,
+            &RuntimeCanvasSurfaceSource(canvas_surfaces),
         )
     }
 
