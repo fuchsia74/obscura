@@ -11568,6 +11568,7 @@ fn render_svg_with_font_database(
     // usvg resolves root dimensions before an injected stylesheet can
     // override them, so provide the used viewport as actual root attributes.
     let viewport_svg = svg_with_root_viewport(bytes, width, height, inline_viewport)?;
+    let viewport_svg = dedupe_svg_ids(&String::from_utf8(viewport_svg).ok()?).into_bytes();
     opts.default_size = usvg::Size::from_wh(width as f32, height as f32)?;
     opts.font_family = "Liberation Serif".to_string();
     opts.fontdb = std::sync::Arc::clone(fonts);
@@ -11718,6 +11719,64 @@ fn svg_with_root_viewport(bytes: &[u8], width: u32, height: u32, inline_viewport
     output.push_str(&root);
     output.push_str(&source[tag_end + 1..]);
     Some(output.into_bytes())
+}
+
+/// Make `url(#id)` references resolve to the first element carrying that id.
+///
+/// usvg builds its `element_by_id` map with `HashMap::insert`, so when two
+/// elements share an `id` the later one overwrites the earlier and `url(#id)`
+/// resolves to the later element. Browsers resolve to the first instead. Drop
+/// duplicate `id` attributes so usvg's map keeps only the first element per id,
+/// matching browser paint order. Vue-serialized SVG commonly leaks `v-if`/`v-else`
+/// pairs that duplicate ids (for example a theme-dependent gradient pair).
+fn dedupe_svg_ids(source: &str) -> String {
+    let mut seen = HashSet::new();
+    let mut out = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // An `id` attribute name is preceded by whitespace (or starts the input).
+        let boundary = i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r');
+        if boundary && bytes.get(i) == Some(&b'i') && bytes.get(i + 1) == Some(&b'd') {
+            let mut j = i + 2;
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b'=') {
+                let mut k = j + 1;
+                while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+                    k += 1;
+                }
+                if let Some(quote) = bytes.get(k).copied() {
+                    if quote == b'"' || quote == b'\'' {
+                        let mut n = k + 1;
+                        while n < bytes.len() && bytes[n] != quote {
+                            n += 1;
+                        }
+                        if n < bytes.len() {
+                            let id = &source[k + 1..n];
+                            if seen.insert(id.to_string()) {
+                                out.push_str(&source[i..=n]);
+                            } else {
+                                while matches!(
+                                    out.as_bytes().last(),
+                                    Some(b' ' | b'\t' | b'\n' | b'\r')
+                                ) {
+                                    out.pop();
+                                }
+                            }
+                            i = n + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Value byte range for one attribute in an `<svg ...>` start tag.
