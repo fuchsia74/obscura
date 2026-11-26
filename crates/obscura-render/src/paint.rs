@@ -5518,6 +5518,7 @@ fn paint_laid_dom_scrolled(
                     base_url,
                     image_cache,
                     raster_scale,
+                    false,
                 );
             }
         }
@@ -10149,6 +10150,7 @@ fn paint_positioned_pseudo(
     base_url: Option<&str>,
     image_cache: &mut RenderResourceCache,
     raster_scale: f32,
+    suppress_effects: bool,
 ) {
     if style.position != Some(taffy::Position::Absolute)
         || style.display == crate::Display::None
@@ -10224,28 +10226,67 @@ fn paint_positioned_pseudo(
             })
         })
         .unwrap_or(static_position_rect.y);
-    let mut rect = crate::Rect {
+    let rect = crate::Rect {
         x,
         y,
         width,
         height,
     };
-    // Apply a lone `scale(sx, sy)` around the box centre (the default
-    // `transform-origin`). Real elements route the full transform list through
-    // the layer compositor; a checked radio's dot uses a single `scale(.5)`,
-    // which is the common case worth covering here so the dot is half-size
-    // instead of filling the whole control.
-    if let [crate::TransformOp::Scale(sx, sy)] = style.transform_ops.as_slice() {
-        let (sx, sy) = (*sx, *sy);
-        if sx > 0.0 && sy > 0.0 {
-            let center_x = rect.x + rect.width / 2.0;
-            let center_y = rect.y + rect.height / 2.0;
-            let scaled_width = rect.width * sx;
-            let scaled_height = rect.height * sy;
-            rect.x = center_x - scaled_width / 2.0;
-            rect.y = center_y - scaled_height / 2.0;
-            rect.width = scaled_width;
-            rect.height = scaled_height;
+    // Apply the pseudo's own transform and opacity. Real elements route these
+    // through the layer compositor; the hand-laid-out pseudo box must do it
+    // here. A checked radio's dot scales to half size and a checked checkbox's
+    // tick rotates into place, both via a transform list richer than a lone
+    // scale, so resolve the full matrix rather than special-casing one op.
+    if !suppress_effects {
+        let opacity = style.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+        let transform_matrix = crate::dom::resolved_transform_property_matrix(
+            style,
+            &rect,
+            root_font_size,
+            viewport,
+        );
+        let (origin_x, origin_y) = match style.transform_origin {
+            Some((ox, oy)) => {
+                let ox = resolve(ox, rect.width).unwrap_or(rect.width / 2.0);
+                let oy = resolve(oy, rect.height).unwrap_or(rect.height / 2.0);
+                (rect.x + ox, rect.y + oy)
+            }
+            None => (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+        };
+        let full = transform_matrix.around((origin_x, origin_y));
+        if (full != crate::Affine2::IDENTITY || opacity < 1.0)
+            && ancestor_overflow_clip.is_none()
+            && style.clip_path.is_none()
+        {
+            // Paint the untransformed box into a full-size layer, then composite
+            // it back with the transform and opacity. The clip-free guard keeps
+            // this path simple: an ancestor overflow clip or clip-path would
+            // have to be re-applied after the transform.
+            let Some(mut layer) = Pixmap::new(pixmap.width(), pixmap.height()) else {
+                return;
+            };
+            paint_positioned_pseudo(
+                text_engine,
+                &mut layer,
+                style,
+                containing_block,
+                static_position_rect,
+                viewport,
+                root_font_size,
+                clip_extent,
+                None,
+                base_url,
+                image_cache,
+                raster_scale,
+                true,
+            );
+            let transform = Transform::from_row(full.a, full.b, full.c, full.d, full.e, full.f);
+            let group_paint = tiny_skia::PixmapPaint {
+                opacity,
+                ..tiny_skia::PixmapPaint::default()
+            };
+            pixmap.draw_pixmap(0, 0, layer.as_ref(), &group_paint, transform, None);
+            return;
         }
     }
     let ancestor_clip = ancestor_overflow_clip.map(|clip| clip.viewport_rect(clip_extent));
