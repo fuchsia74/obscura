@@ -10232,6 +10232,9 @@ fn paint_positioned_pseudo(
         width,
         height,
     };
+    let ancestor_clip = ancestor_overflow_clip.map(|clip| clip.viewport_rect(clip_extent));
+    let ancestor_clip_mask = ancestor_overflow_clip
+        .and_then(|clip| overflow_clip_mask(pixmap.width(), pixmap.height(), clip, clip_extent));
     // Apply the pseudo's own transform and opacity. Real elements route these
     // through the layer compositor; the hand-laid-out pseudo box must do it
     // here. A checked radio's dot scales to half size and a checked checkbox's
@@ -10254,14 +10257,13 @@ fn paint_positioned_pseudo(
             None => (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
         };
         let full = transform_matrix.around((origin_x, origin_y));
-        if (full != crate::Affine2::IDENTITY || opacity < 1.0)
-            && ancestor_overflow_clip.is_none()
-            && style.clip_path.is_none()
-        {
+        if (full != crate::Affine2::IDENTITY || opacity < 1.0) && style.clip_path.is_none() {
             // Paint the untransformed box into a full-size layer, then composite
-            // it back with the transform and opacity. The clip-free guard keeps
-            // this path simple: an ancestor overflow clip or clip-path would
-            // have to be re-applied after the transform.
+            // it back with the transform and opacity. The ancestor overflow clip
+            // is re-applied during the composite (it must clip the transformed
+            // result, not the untransformed source). A clip-path is left to the
+            // direct path below because it clips the box itself before the
+            // transform.
             let Some(mut layer) = Pixmap::new(pixmap.width(), pixmap.height()) else {
                 return;
             };
@@ -10285,11 +10287,17 @@ fn paint_positioned_pseudo(
                 opacity,
                 ..tiny_skia::PixmapPaint::default()
             };
-            pixmap.draw_pixmap(0, 0, layer.as_ref(), &group_paint, transform, None);
+            pixmap.draw_pixmap(
+                0,
+                0,
+                layer.as_ref(),
+                &group_paint,
+                transform,
+                ancestor_clip_mask.as_ref(),
+            );
             return;
         }
     }
-    let ancestor_clip = ancestor_overflow_clip.map(|clip| clip.viewport_rect(clip_extent));
     let visible = match ancestor_clip {
         Some(clip) => rect.intersect(&clip),
         None => Some(rect),
@@ -10298,8 +10306,6 @@ fn paint_positioned_pseudo(
     if !rect_intersects_paint_surface(&non_text_ink_bounds(&rect, style), pixmap, raster_scale) {
         return;
     }
-    let ancestor_clip_mask = ancestor_overflow_clip
-        .and_then(|clip| overflow_clip_mask(pixmap.width(), pixmap.height(), clip, clip_extent));
     let radius = style.border_model.radii.resolve(rect.width, rect.height);
     let clip_path_mask = style.clip_path.as_ref().and_then(|polygon| {
         polygon_clip_mask(
