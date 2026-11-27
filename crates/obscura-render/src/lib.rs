@@ -2579,7 +2579,17 @@ pub(crate) fn to_taffy_style(style: &LayoutStyle) -> Style {
         s.flex_wrap = fw;
     } else if style.display == Display::Inline {
         s.flex_direction = taffy::FlexDirection::Row;
-        s.flex_wrap = taffy::FlexWrap::Wrap;
+        // `white-space: nowrap`/`pre` keep an inline run on one line; the
+        // wrapping flex-row stand-in would otherwise split it into several
+        // lines, e.g. a long `text-overflow: ellipsis` headline.
+        s.flex_wrap = if matches!(
+            style.white_space,
+            Some(crate::WhiteSpace::NoWrap | crate::WhiteSpace::Pre)
+        ) {
+            taffy::FlexWrap::NoWrap
+        } else {
+            taffy::FlexWrap::Wrap
+        };
     } else {
         s.flex_wrap = taffy::FlexWrap::NoWrap;
     }

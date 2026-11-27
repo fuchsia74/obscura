@@ -21891,6 +21891,31 @@ mod tests {
     }
 
     #[test]
+    fn nowrap_inline_title_with_background_stays_one_line() {
+        // A transparent background stops the <a> from being flattened, so it
+        // keeps its own inline flex-row stand-in. That stand-in must still
+        // honour `white-space: nowrap` and keep the long title on one line.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #li{width:839px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:16px;line-height:38px}
+                #date{float:right}
+                #title{background-color:transparent}
+            </style>
+            <div id="li">
+              <span id="date">2026-11-27</span>
+              <a id="title">李强主持召开国务院常务会议 听取推动高质量发展综合督查情况汇报 研究持续深化资本市场投融资综合改革工作 听取国家标准体系建设情况汇报 审议通过《生产安全事故隐患排查治理条例（草案）》</a>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (1440.0, 900.0));
+        let li = laid.rects[&tree.get_element_by_id("li").unwrap()];
+        assert!(
+            (li.height - 38.0).abs() < 0.01,
+            "nowrap inline title must stay one line: {li:?}"
+        );
+    }
+
+    #[test]
     fn auto_width_authored_table_honors_percentage_cell_intrinsic_constraints() {
         let tree = parse_html(
             r#"<style>
