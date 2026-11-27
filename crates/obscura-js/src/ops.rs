@@ -3110,8 +3110,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 if arg2 == "element" {
                     return dom.borrow_node(root).and_then(|node| node.as_element().map(|_| root));
                 }
-                dom.children(root).into_iter().find(|&child|
-                    dom.borrow_node(child).is_some_and(|node| node.as_element().is_some()))
+                dom.find_child(root, |node| node.as_element().is_some())
             });
             let found = element.and_then(|element| {
                 if cmd == "document_element" { return Some(element); }
@@ -3120,13 +3119,11 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 if name.ns.as_ref() != "http://www.w3.org/1999/xhtml" || name.local.as_ref() != "html" {
                     return None;
                 }
-                dom.children(element).into_iter().find(|&child| {
-                    dom.borrow_node(child).is_some_and(|node| node.as_element().is_some_and(|name| {
-                        name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                            && if cmd == "document_head" { name.local.as_ref() == "head" }
-                               else { matches!(name.local.as_ref(), "body" | "frameset") }
-                    }))
-                })
+                dom.find_child(element, |node| node.as_element().is_some_and(|name| {
+                    name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
+                        && if cmd == "document_head" { name.local.as_ref() == "head" }
+                           else { matches!(name.local.as_ref(), "body" | "frameset") }
+                }))
             });
             found.map_or_else(|| "-1".into(), |node| node.index().to_string())
         }
@@ -10208,7 +10205,7 @@ fn op_layout_hit_test(state: &OpState, x: f64, y: f64, frame_id: u32) -> i32 {
 #[cfg(feature = "render")]
 #[op2]
 #[string]
-fn op_layout_caret(state: &OpState, x: f64, y: f64, frame_id: u32) -> String {
+fn op_layout_caret(state: &OpState, x: f64, y: f64, frame_id: u32, rescope_shadow: bool) -> String {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let shared = frame_state(state, frame_id);
         let mut gs = shared.borrow_mut();
@@ -10217,7 +10214,18 @@ fn op_layout_caret(state: &OpState, x: f64, y: f64, frame_id: u32) -> String {
         let (_, scroll) = gs.resolved_scroll.as_ref()?;
         let prepared = gs.prepared_render.as_ref()?;
         let dom = gs.dom.as_ref()?;
-        let (node, offset) = prepared.caret_from_point(dom, scroll, x as f32, y as f32)?;
+        let (mut node, mut offset) = prepared.caret_from_point(dom, scroll, x as f32, y as f32)?;
+        if rescope_shadow && dom.has_shadow_roots() {
+            let mut remaining = dom.len();
+            while let Some(root) = dom.containing_shadow_root(node) {
+                if remaining == 0 { return None; }
+                remaining -= 1;
+                let host = dom.shadow_root_info(root)?.host;
+                let parent = dom.with_node(host, |node| node.parent).flatten()?;
+                offset = dom.children(parent).iter().position(|child| *child == host)?;
+                node = parent;
+            }
+        }
         Some(serde_json::json!([node.raw(), offset]).to_string())
     })).ok().flatten().unwrap_or_default()
 }

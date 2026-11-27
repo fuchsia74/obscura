@@ -1041,6 +1041,7 @@ pub fn emit_navigation_events(
         let idle_ts = timestamp();
         lifecycle_timestamps[3] = Some(idle_ts);
         lifecycle_timestamps[4] = Some(idle_ts);
+        phase3.push(CdpEvent { method: "Page.lifecycleEvent".into(), params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "networkAlmostIdle", "timestamp": idle_ts}), session_id: es.clone() });
         phase3.push(CdpEvent { method: "Page.lifecycleEvent".into(), params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "networkIdle", "timestamp": idle_ts}), session_id: es.clone() });
     }
     phase3.push(CdpEvent {
@@ -1305,6 +1306,15 @@ pub fn parse_wait_until(params: &Value) -> WaitUntil {
         .unwrap_or(WaitUntil::DomContentLoaded)
 }
 
+pub(crate) fn navigation_error_message(message: String, blocked: bool) -> String {
+    if blocked {
+        if let Some(hint) = obscura_net::private_network_error_hint(&message) {
+            return format!("{message} {hint}");
+        }
+    }
+    message
+}
+
 async fn do_navigate(
     url: &str,
     params: &Value,
@@ -1353,11 +1363,11 @@ async fn do_navigate(
         let result = if nav_method == "POST" && !nav_body.is_empty() {
             page.navigate_with_wait_post(url, wait_until, nav_method, nav_body)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| navigation_error_message(e.to_string(), page.navigation_was_blocked()))
         } else {
             page.navigate_with_wait(url, wait_until)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| navigation_error_message(e.to_string(), page.navigation_was_blocked()))
         };
         let committed = page.with_dom(|dom| previous_document.as_ref().is_none_or(|previous|
             !std::sync::Arc::ptr_eq(previous, &dom.form_cache_generation_handle()))).unwrap_or(false);
@@ -1453,6 +1463,7 @@ pub async fn handle(
                     CdpEvent { method: "Page.domContentEventFired".into(), params: json!({"timestamp": ts}), session_id: es.clone() },
                     CdpEvent { method: "Page.lifecycleEvent".into(), params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "load", "timestamp": ts}), session_id: es.clone() },
                     CdpEvent { method: "Page.loadEventFired".into(), params: json!({"timestamp": ts}), session_id: es.clone() },
+                    CdpEvent { method: "Page.lifecycleEvent".into(), params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "networkAlmostIdle", "timestamp": ts}), session_id: es.clone() },
                     CdpEvent { method: "Page.lifecycleEvent".into(), params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "networkIdle", "timestamp": ts}), session_id: es.clone() },
                     CdpEvent { method: "Page.frameStoppedLoading".into(), params: json!({"frameId": frame_id, "timestamp": ts}), session_id: es },
                 ];
