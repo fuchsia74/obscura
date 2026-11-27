@@ -15237,7 +15237,12 @@ fn build_children_with_float_zone(
                             .get(cid)
                             .is_some_and(|style| style.display != crate::Display::None)
                     } else {
-                        !tree.text_content(*cid).trim().is_empty()
+                        // Only non-whitespace text is substantive; comments,
+                        // doctypes, and processing instructions generate no box.
+                        matches!(
+                            &node.data,
+                            obscura_dom::tree::NodeData::Text { contents } if !contents.trim().is_empty()
+                        )
                     }
                 })
             })
@@ -15399,7 +15404,13 @@ fn build_children_with_float_zone(
                 continue;
             }
             let is_whitespace = tree.borrow_node(cid).map_or(false, |node| {
-                !node.is_element() && tree.text_content(cid).trim().is_empty()
+                // Comments, doctypes, and processing instructions are ignored
+                // entirely; only non-whitespace text is real flow content.
+                !node.is_element()
+                    && !matches!(
+                        &node.data,
+                        obscura_dom::tree::NodeData::Text { contents } if !contents.trim().is_empty()
+                    )
             });
             if is_whitespace {
                 if has_flow_content && pending_whitespace.is_none() {
@@ -15500,7 +15511,12 @@ fn build_children_with_float_zone(
             return true;
         };
         if !node.is_element() {
-            return tree.text_content(cid).trim().is_empty();
+            // Comments, doctypes, and processing instructions generate no box
+            // and are empty bridges; only non-whitespace text stops the scan.
+            return !matches!(
+                &node.data,
+                obscura_dom::tree::NodeData::Text { contents } if !contents.trim().is_empty()
+            );
         }
         let style = styles.get(&cid);
         if style.is_some_and(|style| style.display == crate::Display::None) {
@@ -15594,9 +15610,15 @@ fn build_children_with_float_zone(
         if is_float(cid) && styles.get(&cid).and_then(|style| style.float) == float_side {
             float_count += 1;
             run_end += 1;
-        } else if tree.borrow_node(cid).map_or(false, |n| !n.is_element())
-            && tree.text_content(cid).trim().is_empty()
-        {
+        } else if tree.borrow_node(cid).map_or(false, |n| {
+            // Comments, doctypes, and processing instructions generate no
+            // formatting box and cannot split a run of floats. Only actual
+            // non-whitespace text requires the legacy inline float path.
+            !matches!(
+                &n.data,
+                obscura_dom::tree::NodeData::Text { contents } if !contents.trim().is_empty()
+            )
+        }) {
             run_end += 1;
         } else {
             break;
@@ -17805,6 +17827,122 @@ mod tests {
         assert!(
             (container.height - 150.0).abs() < 0.01,
             "one float band must be as tall as its tallest float: {container:?}"
+        );
+    }
+
+    #[test]
+    fn html_comments_do_not_split_float_zone_bands() {
+        // The float-zone path (used for multi-band parents) must skip HTML
+        // comments just like the native band guard does. A comment marker
+        // between two percentage columns otherwise splits the run and stacks
+        // the second column below the first.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #container{box-sizing:border-box;width:780px}
+                .left{float:left;box-sizing:border-box;width:66.66666667%;height:100px}
+                .right{float:left;box-sizing:border-box;width:33.33333333%;height:100px}
+                #clear{clear:both;height:1px}
+            </style>
+            <div id="container">
+              <div id="a" class="left"></div>
+              <!-- column marker -->
+              <div id="b" class="right"></div>
+              <div id="clear"></div>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (900.0, 300.0));
+        let a = laid.rects[&tree.get_element_by_id("a").unwrap()];
+        let b = laid.rects[&tree.get_element_by_id("b").unwrap()];
+        assert!((a.y - b.y).abs() < 0.01, "b wrapped below a: {a:?} {b:?}");
+        assert!((a.width - 520.0).abs() < 0.01, "{a:?}");
+        assert!((b.width - 260.0).abs() < 0.01, "{b:?}");
+        assert!(b.x > a.x, "b must sit to the right of a: {b:?}");
+    }
+
+    #[test]
+    fn html_comments_do_not_split_opposing_float_zone_bands() {
+        // A left float and a right float share one band when a comment sits
+        // between them. The bridge scan must treat the comment as empty, or it
+        // stops early and serializes the two floats into stacked rows.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #parent{width:780px}
+                #left{float:left;width:250px;height:100px}
+                #right{float:right;width:80px;height:100px}
+                #clear{clear:both;height:1px}
+            </style>
+            <div id="parent">
+              <div id="left"></div><!-- marker --><div id="right"></div>
+              <div id="clear"></div>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (900.0, 300.0));
+        let left = laid.rects[&tree.get_element_by_id("left").unwrap()];
+        let right = laid.rects[&tree.get_element_by_id("right").unwrap()];
+        assert!(
+            (left.y - right.y).abs() < 0.01,
+            "right wrapped below left: {left:?} {right:?}"
+        );
+        assert!(
+            (right.x - 700.0).abs() < 0.01,
+            "right float must hug the right edge: {right:?}"
+        );
+    }
+
+    #[test]
+    fn html_comments_do_not_break_the_definite_height_float_band() {
+        // A full-width float in a definite-height parent uses the bounded
+        // one-band fast path. A trailing comment must not count as a second
+        // substantive item, or the fast path is skipped and the percentage
+        // width collapses against the synthetic auto box.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #parent{width:780px;height:100px}
+                #full{float:left;width:100%;height:100%}
+            </style>
+            <div id="parent">
+              <div id="full"></div><!-- marker -->
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (900.0, 300.0));
+        let full = laid.rects[&tree.get_element_by_id("full").unwrap()];
+        assert!(
+            (full.width - 780.0).abs() < 0.01,
+            "full-width float must span the parent: {full:?}"
+        );
+    }
+
+    #[test]
+    fn html_comments_do_not_split_the_right_float_nav_flow() {
+        // A utility/navigation bar is modelled as inline flow plus a reversed
+        // right-float group. A comment inside the flow must be ignored, not
+        // treated as a flow sibling that breaks whitespace collapsing.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #parent{width:780px;height:40px}
+                #r1{float:right;width:50px;height:20px}
+                #r2{float:right;width:50px;height:20px}
+                .item{display:inline-block;width:30px;height:20px}
+            </style>
+            <div id="parent">
+              <span class="item"></span><!-- marker --><span class="item"></span>
+              <div id="r1"></div><div id="r2"></div>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (900.0, 300.0));
+        let r1 = laid.rects[&tree.get_element_by_id("r1").unwrap()];
+        let r2 = laid.rects[&tree.get_element_by_id("r2").unwrap()];
+        assert!(
+            (r1.y - r2.y).abs() < 0.01,
+            "right floats must share a band: {r1:?} {r2:?}"
+        );
+        assert!(
+            (r1.x - 730.0).abs() < 0.01 && (r2.x - 680.0).abs() < 0.01,
+            "right floats must hug the inline end: {r1:?} {r2:?}"
         );
     }
 
