@@ -14614,7 +14614,15 @@ fn run_wrapper_style(parent: &crate::LayoutStyle, has_text_strut: bool) -> taffy
         direction: parent.direction.unwrap_or(taffy::Direction::Ltr),
         display: taffy::style::Display::Flex,
         flex_direction: taffy::FlexDirection::Row,
-        flex_wrap: taffy::FlexWrap::Wrap,
+        // `white-space: nowrap` keeps the whole inline run on one line; the
+        // anonymous flex row here would otherwise wrap the flattened text
+        // words and split a long `text-overflow: ellipsis` headline into
+        // several lines.
+        flex_wrap: if parent.white_space == Some(crate::WhiteSpace::NoWrap) {
+            taffy::FlexWrap::NoWrap
+        } else {
+            taffy::FlexWrap::Wrap
+        },
         align_items: Some(taffy::AlignItems::FLEX_START),
         justify_content: justify,
         size: taffy::Size {
@@ -21805,6 +21813,81 @@ mod tests {
         assert!((submit.x - (bulk.x + bulk.width)).abs() < 0.1);
         assert!((bulk.y - submit.y).abs() < 0.1);
         assert!(((submit.x + submit.width) - (group.x + group.width)).abs() < 0.1);
+    }
+
+    #[test]
+    fn nowrap_block_keeps_flattened_inline_text_on_one_line() {
+        // A nowrap block wraps a long inline run through the anonymous flex
+        // row (the <a> is flattened into per-word leaves). The row must not
+        // wrap those words, or a long headline splits across several lines.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #c{width:200px;white-space:nowrap;font-size:16px;line-height:20px}
+            </style>
+            <div id="c"><a>alpha beta gamma delta epsilon zeta</a></div>"#,
+        );
+        let laid = layout_dom(&tree, (400.0, 200.0));
+        let c = laid.rects[&tree.get_element_by_id("c").unwrap()];
+        assert!(
+            (c.height - 20.0).abs() < 0.01,
+            "nowrap run must stay one line: {c:?}"
+        );
+    }
+
+    #[test]
+    fn nowrap_float_zone_keeps_inline_title_on_one_line() {
+        // The news-list shape: a nowrap item with a right float (date) beside
+        // a long inline title. The title must truncate on one line, not wrap.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                #li{width:839px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:16px;line-height:38px}
+                #date{float:right}
+            </style>
+            <div id="li">
+              <span id="date">2026-11-27</span>
+              <a id="title">李强主持召开国务院常务会议 听取推动高质量发展综合督查情况汇报 研究持续深化资本市场投融资综合改革工作 听取国家标准体系建设情况汇报 审议通过《生产安全事故隐患排查治理条例（草案）》</a>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (1440.0, 900.0));
+        let li = laid.rects[&tree.get_element_by_id("li").unwrap()];
+        assert!(
+            (li.height - 38.0).abs() < 0.01,
+            "nowrap float-zone title must stay one line: {li:?}"
+        );
+    }
+
+    #[test]
+    fn nowrap_title_inside_nested_float_zones_stays_one_line() {
+        // The real news-list path: the nowrap item sits inside a floated
+        // column that is itself one of several floats in an outer float zone.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                .row{width:1306px}
+                .col-sm-8{float:left;width:66.66666667%}
+                .col-sm-4{float:left;width:33.33333333%}
+                .m-lst li{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:38px;font-size:16px}
+                .m-lst span{float:right}
+            </style>
+            <div class="row">
+              <div class="col-sm-8">
+                <ul class="m-lst"><li id="li">
+                  <span>2026-11-27</span>
+                  <a>李强主持召开国务院常务会议 听取推动高质量发展综合督查情况汇报 研究持续深化资本市场投融资综合改革工作 听取国家标准体系建设情况汇报 审议通过《生产安全事故隐患排查治理条例（草案）》</a>
+                </li></ul>
+              </div>
+              <!-- marker -->
+              <div class="col-sm-4"></div>
+            </div>"#,
+        );
+        let laid = layout_dom(&tree, (1440.0, 900.0));
+        let li = laid.rects[&tree.get_element_by_id("li").unwrap()];
+        assert!(
+            (li.height - 38.0).abs() < 0.01,
+            "nowrap title in nested float zones must stay one line: {li:?}"
+        );
     }
 
     #[test]
