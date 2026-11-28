@@ -58,6 +58,13 @@ struct Args {
     #[arg(long, global = true)]
     allow_private_network: bool,
 
+    /// Restrict requests to these root domains (and their subdomains).
+    /// Requests to any other domain are blocked and logged with the reason.
+    /// Repeat the flag or pass comma-separated values. Global: applies to
+    /// fetch, serve, scrape, and mcp.
+    #[arg(long, global = true, value_delimiter = ',')]
+    allow_domain: Vec<String>,
+
     /// Pass raw flags to V8, in the same form V8/Chromium/Node accept
     /// (e.g. `"--max-old-space-size=4096 --max-semi-space-size=64 --expose-gc"`).
     /// Applied once at startup before any isolate is created.
@@ -447,6 +454,13 @@ async fn run_cli() -> anyhow::Result<()> {
         unsafe {
             std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         }
+    }
+
+    // The domain allowlist is a process-wide gate read by both the reqwest
+    // and stealth transports; set it once before any navigation so every
+    // command (fetch/serve/scrape/mcp) enforces the same policy.
+    if !args.allow_domain.is_empty() {
+        obscura_net::set_allowed_domains(args.allow_domain.clone());
     }
 
     let global_proxy = args.proxy.clone();

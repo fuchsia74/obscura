@@ -881,6 +881,49 @@ async fn read_reqwest_body_into(
     Ok(())
 }
 
+/// True when `host` equals `domain` or is a subdomain of it (matched
+/// case-insensitively). `url::Url::host_str` is already lowercase; `domain`
+/// may carry leading/trailing whitespace from a CLI list and is trimmed.
+pub(crate) fn host_matches_domain(host: &str, domain: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let domain = domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return false;
+    }
+    host == domain
+        || (host.len() > domain.len()
+            && host.ends_with(&domain)
+            && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+}
+
+/// Process-wide domain allowlist set by the CLI's `--allow-domain`. Clients
+/// consult this in addition to their own `allowed_domains` field, so the flag
+/// also reaches the CDP `serve` path without threading the list through the
+/// server options chain.
+static GLOBAL_ALLOWED_DOMAINS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Set the process-wide domain allowlist. The CLI calls this once from the
+/// `--allow-domain` flag before any navigation; library users should instead
+/// set the per-client `allowed_domains` field or use `with_domain_scope`.
+pub fn set_allowed_domains(domains: Vec<String>) {
+    if let Ok(mut guard) = GLOBAL_ALLOWED_DOMAINS.lock() {
+        *guard = domains;
+    }
+}
+
+/// True when `host` is permitted: either no allowlist is configured at all,
+/// or it matches the per-client list or the process-wide list.
+pub(crate) fn domain_is_allowed(client_domains: &[String], host: &str) -> bool {
+    let global = GLOBAL_ALLOWED_DOMAINS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if client_domains.is_empty() && global.is_empty() {
+        return true;
+    }
+    client_domains.iter().any(|domain| host_matches_domain(host, domain))
+        || global.iter().any(|domain| host_matches_domain(host, domain))
+}
+
 pub struct ObscuraHttpClient {
     client: tokio::sync::OnceCell<Client>,
     proxy_url: Option<String>,
@@ -892,6 +935,10 @@ pub struct ObscuraHttpClient {
     pub timeout: Duration,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
     pub block_trackers: bool,
+    /// When non-empty, requests are allowed only to these root domains and
+    /// their subdomains. Anything else is blocked and logged. Set via
+    /// `--allow-domain` on the CLI. Empty means no restriction.
+    pub allowed_domains: Vec<String>,
     resource_loader: std::sync::Mutex<ResourceLoaderState>,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local addresses
     /// through in addition to the `OBSCURA_ALLOW_PRIVATE_NETWORK` env var.
@@ -1174,6 +1221,7 @@ impl ObscuraHttpClient {
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             timeout: Duration::from_secs(30),
             block_trackers: false,
+            allowed_domains: Vec::new(),
             resource_loader: std::sync::Mutex::new(ResourceLoaderState::default()),
             allow_private_network,
             allow_file_access: AtomicBool::new(false),
@@ -1574,6 +1622,21 @@ impl ObscuraHttpClient {
                         redirected_from: Vec::new(),
                     });
                 }
+            }
+        }
+        if let Some(host) = url.host_str() {
+            if !domain_is_allowed(&self.allowed_domains, host) {
+                tracing::warn!(
+                    "blocked {}: domain not in --allow-domain",
+                    url
+                );
+                return Ok(Response {
+                    status: 0,
+                    url: url.clone(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                    redirected_from: Vec::new(),
+                });
             }
         }
 
@@ -3654,5 +3717,40 @@ mod file_access_tests {
         assert_eq!(client.fetch(&url).await.unwrap().body, b"local-secret");
         client.set_allow_file_access(false);
         assert!(client.fetch(&url).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod domain_scope_tests {
+    use super::{domain_is_allowed, host_matches_domain};
+
+    #[test]
+    fn host_matches_exact_and_subdomain() {
+        assert!(host_matches_domain("example.com", "example.com"));
+        assert!(host_matches_domain("www.example.com", "example.com"));
+        assert!(host_matches_domain("a.b.example.com", "example.com"));
+        assert!(!host_matches_domain("example.com", "www.example.com"));
+        assert!(!host_matches_domain("example.org", "example.com"));
+        assert!(!host_matches_domain("badexample.com", "example.com"));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive_and_trims() {
+        assert!(host_matches_domain("EXAMPLE.com", "example.com"));
+        assert!(host_matches_domain("example.com", " example.com "));
+    }
+
+    #[test]
+    fn empty_allowlist_permits_everything() {
+        assert!(domain_is_allowed(&[], "example.com"));
+        assert!(domain_is_allowed(&[], "anything.org"));
+    }
+
+    #[test]
+    fn client_list_restricts_to_listed_domains() {
+        let list = vec!["example.com".to_string()];
+        assert!(domain_is_allowed(&list, "example.com"));
+        assert!(domain_is_allowed(&list, "sub.example.com"));
+        assert!(!domain_is_allowed(&list, "other.org"));
     }
 }

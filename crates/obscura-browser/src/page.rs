@@ -1123,6 +1123,7 @@ impl Page {
                 context.allow_private_network,
             ).with_user_agent(context.user_agent_override.clone());
             client.allow_file_access = context.allow_file_access;
+            client.allowed_domains = context.allowed_domains.clone();
             Some(Arc::new(client))
         } else {
             None

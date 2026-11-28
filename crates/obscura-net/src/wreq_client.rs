@@ -204,6 +204,10 @@ pub struct StealthHttpClient {
     /// Lets `fetch_file_url` read local files. Off by default.
     pub allow_file_access: bool,
     pub block_trackers: bool,
+    /// When non-empty, requests are allowed only to these root domains and
+    /// their subdomains. Anything else is blocked and logged. Empty means no
+    /// restriction.
+    pub allowed_domains: Vec<String>,
     pub cookie_jar: Arc<CookieJar>,
     pub extra_headers: RwLock<HashMap<String, String>>,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
@@ -301,6 +305,7 @@ impl StealthHttpClient {
             block_trackers: tracker_blocking_enabled(
                 std::env::var("OBSCURA_BLOCK_TRACKERS").ok().as_deref(),
             ),
+            allowed_domains: Vec::new(),
             cookie_jar,
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -407,6 +412,22 @@ impl StealthHttpClient {
                 body: Vec::new(),
                 redirected_from: Vec::new(),
             });
+        }
+
+        if let Some(host) = current_url.host_str() {
+            if !crate::client::domain_is_allowed(&self.allowed_domains, host) {
+                tracing::warn!(
+                    "blocked {}: domain not in --allow-domain",
+                    current_url
+                );
+                return Ok(Response {
+                    status: 0,
+                    url: current_url,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                    redirected_from: Vec::new(),
+                });
+            }
         }
 
         let mut redirects = Vec::new();

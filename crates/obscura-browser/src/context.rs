@@ -42,6 +42,10 @@ pub struct BrowserContext {
     /// models: file:// is a local file-system read, while private-network is
     /// the broader SSRF gate from issue #4.
     pub allow_private_network: bool,
+    /// When non-empty, requests are allowed only to these root domains and
+    /// their subdomains; anything else is blocked and logged. Set via
+    /// `--allow-domain` on the CLI. Empty means no restriction.
+    pub allowed_domains: Vec<String>,
 }
 
 /// One origin's persisted `localStorage`. The origin is inside the file, so the
@@ -113,7 +117,7 @@ fn load_web_storage(storage: &OriginStorage, dir: Option<&PathBuf>) {
 
 impl BrowserContext {
     pub fn new(id: String) -> Self {
-        Self::_new_inner(id, None, false, None, None, false)
+        Self::_new_inner(id, None, false, None, None, false, Vec::new())
     }
 
     /// Create a BrowserContext with an optional storage directory.
@@ -123,7 +127,7 @@ impl BrowserContext {
         id: String,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, None, false, None, storage_dir, false)
+        Self::_new_inner(id, None, false, None, storage_dir, false, Vec::new())
     }
 
     /// Create a BrowserContext with full options including storage_dir.
@@ -134,7 +138,7 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false, Vec::new())
     }
 
     /// Variant that also accepts the `allow_private_network` opt-in. All
@@ -148,7 +152,7 @@ impl BrowserContext {
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network, Vec::new())
     }
 
     fn _new_inner(
@@ -158,6 +162,7 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
+        allowed_domains: Vec<String>,
     ) -> Self {
         let cookie_jar = Arc::new(CookieJar::new());
 
@@ -185,6 +190,7 @@ impl BrowserContext {
         if stealth {
             client.block_trackers = true;
         }
+        client.allowed_domains = allowed_domains.clone();
         let profile = crate::profiles::select_profile();
         let user_agent_override = user_agent.clone();
         let resolved_ua = user_agent.unwrap_or_else(|| profile.user_agent.to_string());
@@ -221,6 +227,7 @@ impl BrowserContext {
             allow_file_access: false,
             storage_dir,
             allow_private_network,
+            allowed_domains,
         }
     }
 
@@ -242,7 +249,19 @@ impl BrowserContext {
         stealth: bool,
         user_agent: Option<String>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, Vec::new())
+    }
+
+    /// Variant that also accepts the `--allow-domain` list: requests are
+    /// restricted to these root domains (and their subdomains).
+    pub fn with_domain_scope(
+        id: String,
+        proxy_url: Option<String>,
+        stealth: bool,
+        user_agent: Option<String>,
+        allowed_domains: Vec<String>,
+    ) -> Self {
+        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, allowed_domains)
     }
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
@@ -276,6 +295,7 @@ impl BrowserContext {
         if self.stealth {
             client.block_trackers = true;
         }
+        client.allowed_domains = self.allowed_domains.clone();
         client.set_allow_file_access(self.allow_file_access);
         if let Ok(mut guard) = client.user_agent.try_write() {
             *guard = self.user_agent.clone();
@@ -307,6 +327,7 @@ impl BrowserContext {
             allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
             allow_private_network: self.allow_private_network,
+            allowed_domains: self.allowed_domains.clone(),
         }
     }
 
